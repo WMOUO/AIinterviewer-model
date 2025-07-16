@@ -137,14 +137,34 @@ async def predict(file: UploadFile = File(...)):
         # 讀取檔案內容
         wav_bytes = await file.read()
         
+        # 檢查檔案內容
+        print(f"接收到的檔案大小: {len(wav_bytes)} bytes")
+        print(f"檔案類型: {file.content_type}")
+        print(f"檔案名稱: {file.filename}")
+        
+        if len(wav_bytes) == 0:
+            return JSONResponse(status_code=400, content={"error": "Empty audio file"})
+        
         # 使用 tempfile 處理音訊檔案
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+        # 根據實際格式決定副檔名
+        if file.content_type and 'webm' in file.content_type:
+            suffix = '.webm'
+        elif file.content_type and 'mp4' in file.content_type:
+            suffix = '.mp4'
+        elif file.content_type and 'ogg' in file.content_type:
+            suffix = '.ogg'
+        else:
+            suffix = '.wav'  # 預設
+            
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(wav_bytes)
             temp_file_path = temp_file.name
         
         try:
             # 使用 librosa 直接載入（支援多種格式）
+            print(f"嘗試載入音訊檔案: {temp_file_path}")
             y, sr = librosa.load(temp_file_path, sr=None)
+            print(f"載入成功，取樣率: {sr}, 長度: {len(y)}")
             
             # 確保是單聲道
             if y.ndim > 1:
@@ -156,7 +176,7 @@ async def predict(file: UploadFile = File(...)):
 
             # 檢查音訊長度
             if len(y) == 0:
-                return JSONResponse(status_code=400, content={"error": "Empty audio file"})
+                return JSONResponse(status_code=400, content={"error": "Empty audio data after processing"})
 
             # 切段
             seg_len = int(SEG_DUR_SEC * sr)
@@ -169,30 +189,38 @@ async def predict(file: UploadFile = File(...)):
                     wav_arr = np.pad(y[start:], (0, end - len(y)))
                 segments.append(wav_arr)
 
+            print(f"切分成 {len(segments)} 個片段")
+
             # 檢查是否有段落
             if not segments:
                 return JSONResponse(status_code=400, content={"error": "No audio segments found"})
 
             # 特徵擷取
             feat_list = []
-            for wav_arr in segments:
+            for i, wav_arr in enumerate(segments):
                 if len(wav_arr) == 0:
                     continue
-                wav_tensor = torch.from_numpy(wav_arr).unsqueeze(0)
-                feat = extractor.extract(wav_tensor)
-                T = feat.shape[2]
-                feat = F.pad(feat, (0, MAX_LEN - T)) if T < MAX_LEN else feat[:, :, :MAX_LEN]
-                feat_list.append(feat)
+                try:
+                    wav_tensor = torch.from_numpy(wav_arr).unsqueeze(0)
+                    feat = extractor.extract(wav_tensor)
+                    T = feat.shape[2]
+                    feat = F.pad(feat, (0, MAX_LEN - T)) if T < MAX_LEN else feat[:, :, :MAX_LEN]
+                    feat_list.append(feat)
+                except Exception as e:
+                    print(f"特徵擷取失敗 (片段 {i}): {e}")
+                    continue
             
             if not feat_list:
                 return JSONResponse(status_code=400, content={"error": "No valid features extracted"})
                 
             inputs = torch.stack(feat_list).to(DEVICE)
+            print(f"特徵張量形狀: {inputs.shape}")
 
             # 推論
             with torch.no_grad():
                 logits = model(inputs)
             preds = logits.argmax(1).cpu().tolist()
+            print(f"預測結果: {preds}")
 
             # 回傳
             result = [
