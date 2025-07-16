@@ -6,9 +6,16 @@ import torch.nn.functional as F
 import soundfile as sf
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
-from typing import List, Tuple
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "https://a-iinterviewer.5316eictlws-2.workers.dev/"],  # 可加上你的正式前端網址
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class ImprovedFeatureExtractorLibrosa:
     def __init__(self,
