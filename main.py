@@ -7,6 +7,9 @@ import soundfile as sf
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+import tempfile
+import os
+
 
 app = FastAPI()
 app.add_middleware(
@@ -134,72 +137,76 @@ async def predict(file: UploadFile = File(...)):
         # 讀取檔案內容
         wav_bytes = await file.read()
         
-        # 使用 BytesIO 來處理檔案
-        from io import BytesIO
-        file_buffer = BytesIO(wav_bytes)
+        # 使用 tempfile 處理音訊檔案
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+            temp_file.write(wav_bytes)
+            temp_file_path = temp_file.name
         
-        # 重新設定檔案指標
-        file_buffer.seek(0)
-        
-        # 讀取音訊檔案
-        y, sr = sf.read(file_buffer)
-        
-        # 確保是單聲道
-        if y.ndim > 1:
-            y = y.mean(axis=1)
+        try:
+            # 使用 librosa 直接載入（支援多種格式）
+            y, sr = librosa.load(temp_file_path, sr=None)
             
-        if sr != SR_TARGET:
-            y = librosa.resample(y, orig_sr=sr, target_sr=SR_TARGET)
-            sr = SR_TARGET
+            # 確保是單聲道
+            if y.ndim > 1:
+                y = y.mean(axis=1)
+                
+            if sr != SR_TARGET:
+                y = librosa.resample(y, orig_sr=sr, target_sr=SR_TARGET)
+                sr = SR_TARGET
 
-        # 檢查音訊長度
-        if len(y) == 0:
-            return JSONResponse(status_code=400, content={"error": "Empty audio file"})
+            # 檢查音訊長度
+            if len(y) == 0:
+                return JSONResponse(status_code=400, content={"error": "Empty audio file"})
 
-        # 切段
-        seg_len = int(SEG_DUR_SEC * sr)
-        segments = []
-        for start in range(0, len(y), seg_len):
-            end = start + seg_len
-            if end <= len(y):
-                wav_arr = y[start:end]
-            else:
-                wav_arr = np.pad(y[start:], (0, end - len(y)))
-            segments.append(wav_arr)
+            # 切段
+            seg_len = int(SEG_DUR_SEC * sr)
+            segments = []
+            for start in range(0, len(y), seg_len):
+                end = start + seg_len
+                if end <= len(y):
+                    wav_arr = y[start:end]
+                else:
+                    wav_arr = np.pad(y[start:], (0, end - len(y)))
+                segments.append(wav_arr)
 
-        # 檢查是否有段落
-        if not segments:
-            return JSONResponse(status_code=400, content={"error": "No audio segments found"})
+            # 檢查是否有段落
+            if not segments:
+                return JSONResponse(status_code=400, content={"error": "No audio segments found"})
 
-        # 特徵擷取
-        feat_list = []
-        for wav_arr in segments:
-            if len(wav_arr) == 0:
-                continue
-            wav_tensor = torch.from_numpy(wav_arr).unsqueeze(0)
-            feat = extractor.extract(wav_tensor)
-            T = feat.shape[2]
-            feat = F.pad(feat, (0, MAX_LEN - T)) if T < MAX_LEN else feat[:, :, :MAX_LEN]
-            feat_list.append(feat)
-        
-        if not feat_list:
-            return JSONResponse(status_code=400, content={"error": "No valid features extracted"})
+            # 特徵擷取
+            feat_list = []
+            for wav_arr in segments:
+                if len(wav_arr) == 0:
+                    continue
+                wav_tensor = torch.from_numpy(wav_arr).unsqueeze(0)
+                feat = extractor.extract(wav_tensor)
+                T = feat.shape[2]
+                feat = F.pad(feat, (0, MAX_LEN - T)) if T < MAX_LEN else feat[:, :, :MAX_LEN]
+                feat_list.append(feat)
             
-        inputs = torch.stack(feat_list).to(DEVICE)
+            if not feat_list:
+                return JSONResponse(status_code=400, content={"error": "No valid features extracted"})
+                
+            inputs = torch.stack(feat_list).to(DEVICE)
 
-        # 推論
-        with torch.no_grad():
-            logits = model(inputs)
-        preds = logits.argmax(1).cpu().tolist()
+            # 推論
+            with torch.no_grad():
+                logits = model(inputs)
+            preds = logits.argmax(1).cpu().tolist()
 
-        # 回傳
-        result = [
-            {"start": round(i * SEG_DUR_SEC, 2),
-             "end": round((i + 1) * SEG_DUR_SEC, 2),
-             "label": id2label[p]}
-            for i, p in enumerate(preds)
-        ]
-        return JSONResponse(content={"result": result})
+            # 回傳
+            result = [
+                {"start": round(i * SEG_DUR_SEC, 2),
+                 "end": round((i + 1) * SEG_DUR_SEC, 2),
+                 "label": id2label[p]}
+                for i, p in enumerate(preds)
+            ]
+            return JSONResponse(content={"result": result})
+            
+        finally:
+            # 清理暫時檔案
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
 
     except Exception as e:
         # 添加更詳細的錯誤訊息
